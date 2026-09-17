@@ -17,6 +17,7 @@ from traiNNer.losses.cosim_loss import CosimLoss
 from traiNNer.losses.dists_loss import DISTSLoss
 from traiNNer.losses.ldl_loss import LDLLoss
 from traiNNer.losses.mssim_loss import MSSIMLoss, SSIMLoss
+from traiNNer.losses.noise_statistics_loss import NoiseStatisticsLoss
 from traiNNer.losses.perceptual_fp16_loss import (
     VGG19_CONV_LAYER_WEIGHTS,
     VGG19_RELU_LAYER_WEIGHTS,
@@ -47,6 +48,9 @@ LOSS_FUNCTIONS = [
         1.0,
     ),
     LDLLoss(
+        1.0,
+    ),
+    NoiseStatisticsLoss(
         1.0,
     ),
 ]
