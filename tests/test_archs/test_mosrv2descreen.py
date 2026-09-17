@@ -1,15 +1,15 @@
 import pytest
 import torch
 
-from traiNNer.archs.mosrv2multiscale_arch import MoSRv2MultiScale
-from traiNNer.archs.mosrv2panels_arch import MoSRv2Panels
+from traiNNer.archs.mosrv2descreen_arch import MoSRv2Descreen
 
 
-def _small_model(**kwargs: object) -> MoSRv2Panels:
-    return MoSRv2Panels(
+def _small_model(**kwargs: object) -> MoSRv2Descreen:
+    return MoSRv2Descreen(
         encoder_dims=(8, 12, 16),
         encoder_blocks=(1, 1, 1),
         decoder_blocks=(1, 1, 1),
+        num_downsamples=2,
         context_blocks=1,
         edge_refinement_blocks=1,
         **kwargs,
@@ -17,7 +17,7 @@ def _small_model(**kwargs: object) -> MoSRv2Panels:
 
 
 @pytest.mark.parametrize("height,width", [(32, 32), (33, 47), (48, 65)])
-def test_mosrv2panels_preserves_dynamic_shape(height: int, width: int) -> None:
+def test_mosrv2descreen_preserves_dynamic_shape(height: int, width: int) -> None:
     model = _small_model()
     input_tensor = torch.randn(1, 3, height, width, requires_grad=True)
 
@@ -29,7 +29,7 @@ def test_mosrv2panels_preserves_dynamic_shape(height: int, width: int) -> None:
     assert torch.isfinite(input_tensor.grad).all()
 
 
-def test_mosrv2panels_validates_scale_lists() -> None:
+def test_mosrv2descreen_validates_scale_lists() -> None:
     with pytest.raises(ValueError, match="encoder_dims"):
         _small_model(encoder_dims=(8, 12))
 
@@ -38,8 +38,3 @@ def test_mosrv2panels_validates_scale_lists() -> None:
 
     with pytest.raises(ValueError, match="scale=1"):
         _small_model(scale=2)
-
-
-def test_mosrv2multiscale_validates_task() -> None:
-    with pytest.raises(ValueError, match="task"):
-        MoSRv2MultiScale(task="unknown")
