@@ -209,6 +209,17 @@ class TestLosses:
         else:
             assert torch.allclose(loss_value, loss_value2, atol=1e-6)
 
+    def test_noise_statistics_is_stable_for_amp_inputs(self) -> None:
+        pred = (torch.randn(1, 3, 16, 16, dtype=torch.float16) * 300).requires_grad_()
+        target = torch.zeros_like(pred)
+
+        loss_value = NoiseStatisticsLoss(1.0)(pred, target)
+
+        assert torch.isfinite(loss_value)
+        loss_value.backward()
+        assert pred.grad is not None
+        assert torch.isfinite(pred.grad).all()
+
     def test_msssim(self) -> None:
         white = torch.ones(1, 3, 256, 256)
         black = torch.zeros(1, 3, 256, 256)

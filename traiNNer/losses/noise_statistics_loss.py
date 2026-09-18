@@ -137,7 +137,7 @@ class NoiseStatisticsLoss(nn.Module):
             (padding_h, padding_w),
             count_include_pad=False,
         )
-        return (mean_square - mean.square()).clamp_min(0).sqrt()
+        return (mean_square - mean.square()).clamp_min(self.eps).sqrt()
 
     def _local_rms(self, noise: Tensor) -> Tensor:
         kernel_h = min(self.patch_size, noise.shape[-2])
@@ -152,7 +152,7 @@ class NoiseStatisticsLoss(nn.Module):
             (stride_h, stride_w),
             (padding_h, padding_w),
             count_include_pad=False,
-        ).clamp_min(0).sqrt()
+        ).clamp_min(self.eps).sqrt()
 
     def _spectrum_statistics(self, noise: Tensor) -> tuple[Tensor, Tensor]:
         height, width = noise.shape[-2:]
@@ -184,7 +184,12 @@ class NoiseStatisticsLoss(nn.Module):
 
     def _autocorrelation(self, noise: Tensor) -> Tensor:
         centered = noise - noise.mean(dim=(-2, -1), keepdim=True)
-        rms = centered.square().mean(dim=(-2, -1), keepdim=True).sqrt()
+        rms = (
+            centered.square()
+            .mean(dim=(-2, -1), keepdim=True)
+            .clamp_min(self.eps)
+            .sqrt()
+        )
         correlations = []
         max_vertical_lag = min(self.max_lag, centered.shape[-2] - 1)
         max_horizontal_lag = min(self.max_lag, centered.shape[-1] - 1)
@@ -210,8 +215,8 @@ class NoiseStatisticsLoss(nn.Module):
         pred_noise = self._extract_noise(pred)
         target_noise = self._extract_noise(target)
 
-        pred_rms = pred_noise.square().mean(dim=(-2, -1)).sqrt()
-        target_rms = target_noise.square().mean(dim=(-2, -1)).sqrt()
+        pred_rms = pred_noise.square().mean(dim=(-2, -1)).clamp_min(self.eps).sqrt()
+        target_rms = target_noise.square().mean(dim=(-2, -1)).clamp_min(self.eps).sqrt()
         level_loss = F.l1_loss(torch.log1p(pred_rms), torch.log1p(target_rms))
 
         local_loss = F.l1_loss(
@@ -248,6 +253,9 @@ class NoiseStatisticsLoss(nn.Module):
 
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         self._validate_inputs(pred, target)
+        # Squared statistics and FFTs are numerically unstable in AMP dtypes.
+        pred = pred.float()
+        target = target.float()
         height, width = pred.shape[-2:]
         scale_losses = []
         for scale in self.analysis_scales:
