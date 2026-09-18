@@ -66,3 +66,16 @@ def test_mosrv2noise_supports_super_resolution() -> None:
     output.square().mean().backward()
     assert input_tensor.grad is not None
     assert torch.isfinite(input_tensor.grad).all()
+
+
+def test_mosrv2noise_generates_deterministic_hr_texture() -> None:
+    model = _small_model(scale=2)
+    input_tensor = torch.randn(1, 3, 17, 23)
+
+    first = model(input_tensor)
+    second = model(input_tensor)
+
+    assert first.shape == (1, 3, 34, 46)
+    assert torch.allclose(first, second)
+    traced = torch.jit.trace(model, input_tensor)
+    assert "randn" not in str(traced.graph)

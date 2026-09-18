@@ -77,8 +77,16 @@ class _UpsampleWithSkip(nn.Module):
 
 
 class _DeterministicNoiseInjection(nn.Module):
-    def __init__(self, dim: int, out_ch: int, strength: float, noise_layers: int) -> None:
+    def __init__(
+        self,
+        dim: int,
+        out_ch: int,
+        scale: int,
+        strength: float,
+        noise_layers: int,
+    ) -> None:
         super().__init__()
+        self.scale = scale
         self.condition = nn.Sequential(
             nn.Conv2d(dim, dim, 1),
             nn.GELU(),
@@ -89,12 +97,12 @@ class _DeterministicNoiseInjection(nn.Module):
         layers: list[nn.Module] = [nn.Conv2d(dim * 2, dim, 3, padding=1)]
         for _ in range(noise_layers - 1):
             layers.extend((nn.GELU(), nn.Conv2d(dim, dim, 3, padding=1)))
-        layers.extend((nn.GELU(), nn.Conv2d(dim, out_ch, 3, padding=1)))
+        layers.extend((nn.GELU(), nn.Conv2d(dim, out_ch * scale**2, 3, padding=1)))
         self.noise_features = nn.Sequential(*layers)
         self.gate = nn.Sequential(
             nn.Conv2d(dim, dim, 3, padding=1),
             nn.GELU(),
-            nn.Conv2d(dim, out_ch, 1),
+            nn.Conv2d(dim, out_ch * scale**2, 1),
             nn.Sigmoid(),
         )
         self.log_strength = nn.Parameter(
@@ -112,11 +120,16 @@ class _DeterministicNoiseInjection(nn.Module):
             align_corners=False,
         )
         generated_noise = self.noise_features(torch.cat((condition, coarse), dim=1))
+        if self.scale > 1:
+            generated_noise = F.pixel_shuffle(generated_noise, self.scale)
+        gate = self.gate(condition)
+        if self.scale > 1:
+            gate = F.pixel_shuffle(gate, self.scale)
         generated_noise = generated_noise - generated_noise.mean(
             dim=(-2, -1), keepdim=True
         )
         strength = F.softplus(self.log_strength)
-        return strength * self.gate(condition) * generated_noise
+        return strength * gate * generated_noise
 
 
 @ARCH_REGISTRY.register()
@@ -258,7 +271,9 @@ class MoSRv2MultiScale(nn.Module):
             else nn.Identity()
         )
         self.noise_injection = (
-            _DeterministicNoiseInjection(dims[0], out_ch, noise_strength, noise_layers)
+            _DeterministicNoiseInjection(
+                dims[0], out_ch, scale, noise_strength, noise_layers
+            )
             if task == "noise"
             else nn.Identity()
         )
@@ -304,12 +319,7 @@ class MoSRv2MultiScale(nn.Module):
                 mode="bilinear",
                 align_corners=False,
             )
-            noise_features = F.interpolate(
-                x,
-                size=residual.shape[-2:],
-                mode="bilinear",
-                align_corners=False,
-            )
+            noise_features = x
         if self.task == "noise":
             output = output_base + residual + self.noise_injection(noise_features)
         elif self.task == "panels":
