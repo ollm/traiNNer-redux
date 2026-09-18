@@ -71,7 +71,7 @@ class _UpsampleWithSkip(nn.Module):
         )
 
     def forward(self, x: Tensor, skip: Tensor) -> Tensor:
-        x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
+        x = F.interpolate(x, scale_factor=2, mode="nearest")
         return self.blocks(self.up(x) + self.skip(skip))
 
 

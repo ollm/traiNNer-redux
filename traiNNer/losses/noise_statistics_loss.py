@@ -226,3 +226,8 @@ class NoiseStatisticsLoss(nn.Module):
         if not scale_losses:
             raise ValueError("No analysis scale fits the input spatial dimensions.")
         return torch.stack(scale_losses).mean()
+
+
+@LOSS_REGISTRY.register()
+def noise_statistics(**kwargs: object) -> NoiseStatisticsLoss:
+    return NoiseStatisticsLoss(**kwargs)  # type: ignore[arg-type]
