@@ -93,6 +93,11 @@ class _DeterministicNoiseInjection(nn.Module):
             nn.Conv2d(dim, dim, 3, padding=1),
             nn.GELU(),
         )
+        self.local_detail = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),
+            nn.Conv2d(dim, dim, 1),
+            nn.GELU(),
+        )
         self.coarse_condition = nn.Conv2d(dim, dim, 3, padding=1)
         layers: list[nn.Module] = [nn.Conv2d(dim * 2, dim, 3, padding=1)]
         for _ in range(noise_layers - 1):
@@ -111,7 +116,7 @@ class _DeterministicNoiseInjection(nn.Module):
 
     def forward(self, features: Tensor) -> Tensor:
         height, width = features.shape[-2:]
-        condition = self.condition(features)
+        condition = self.condition(features) + self.local_detail(features)
         coarse = F.avg_pool2d(features, kernel_size=2, stride=2, ceil_mode=True)
         coarse = F.interpolate(
             self.coarse_condition(coarse),
