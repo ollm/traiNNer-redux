@@ -21,7 +21,9 @@ class NoiseStatisticsLoss(nn.Module):
         level_weight: float = 1.0,
         local_weight: float = 1.0,
         spectrum_weight: float = 1.0,
+        spectrum_energy_weight: float = 0.5,
         correlation_weight: float = 1.0,
+        mean_weight: float = 0.25,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
@@ -39,7 +41,14 @@ class NoiseStatisticsLoss(nn.Module):
             raise ValueError("spectrum_bands must be >= 1.")
         if max_lag < 1:
             raise ValueError("max_lag must be >= 1.")
-        if min(level_weight, local_weight, spectrum_weight, correlation_weight) < 0:
+        if min(
+            level_weight,
+            local_weight,
+            spectrum_weight,
+            spectrum_energy_weight,
+            correlation_weight,
+            mean_weight,
+        ) < 0:
             raise ValueError("Noise statistic weights must be non-negative.")
         if eps <= 0:
             raise ValueError("eps must be positive.")
@@ -53,7 +62,9 @@ class NoiseStatisticsLoss(nn.Module):
         self.level_weight = level_weight
         self.local_weight = local_weight
         self.spectrum_weight = spectrum_weight
+        self.spectrum_energy_weight = spectrum_energy_weight
         self.correlation_weight = correlation_weight
+        self.mean_weight = mean_weight
         self.eps = eps
 
         coordinates = torch.arange(blur_kernel_size, dtype=torch.float32)
@@ -89,6 +100,21 @@ class NoiseStatisticsLoss(nn.Module):
         padded = F.pad(image, (radius, radius, radius, radius), mode="reflect")
         smooth = F.conv2d(padded, kernel, groups=channels)
         return image - smooth
+
+    def _local_mean(self, noise: Tensor) -> Tensor:
+        kernel_h = min(self.patch_size, noise.shape[-2])
+        kernel_w = min(self.patch_size, noise.shape[-1])
+        stride_h = min(self.area_stride, kernel_h)
+        stride_w = min(self.area_stride, kernel_w)
+        padding_h = kernel_h // 2
+        padding_w = kernel_w // 2
+        return F.avg_pool2d(
+            noise,
+            (kernel_h, kernel_w),
+            (stride_h, stride_w),
+            (padding_h, padding_w),
+            count_include_pad=False,
+        )
 
     def _local_std(self, noise: Tensor) -> Tensor:
         kernel_h = min(self.patch_size, noise.shape[-2])
@@ -128,7 +154,7 @@ class NoiseStatisticsLoss(nn.Module):
             count_include_pad=False,
         ).clamp_min(0).sqrt()
 
-    def _spectrum_profile(self, noise: Tensor) -> Tensor:
+    def _spectrum_statistics(self, noise: Tensor) -> tuple[Tensor, Tensor]:
         height, width = noise.shape[-2:]
         spectrum = torch.fft.rfft2(noise, norm="ortho").abs().square()
         frequencies_y = torch.fft.fftfreq(height, device=noise.device).abs()
@@ -143,16 +169,18 @@ class NoiseStatisticsLoss(nn.Module):
             device=noise.device,
             dtype=radius.dtype,
         )
-        profiles = []
+        band_powers = []
         for index in range(self.spectrum_bands):
             band = (radius >= edges[index]) & (radius < edges[index + 1])
             if band.any():
                 band_power = spectrum[..., band].mean(dim=-1)
             else:
                 band_power = spectrum.new_zeros(spectrum.shape[:-2])
-            profiles.append(band_power)
-        profile = torch.stack(profiles, dim=-1)
-        return profile / (profile.sum(dim=-1, keepdim=True) + self.eps)
+            band_powers.append(band_power)
+        powers = torch.stack(band_powers, dim=-1)
+        profile = powers / (powers.sum(dim=-1, keepdim=True) + self.eps)
+        energy = torch.log1p(powers)
+        return profile, energy
 
     def _autocorrelation(self, noise: Tensor) -> Tensor:
         centered = noise - noise.mean(dim=(-2, -1), keepdim=True)
@@ -194,18 +222,28 @@ class NoiseStatisticsLoss(nn.Module):
             torch.log1p(self._local_rms(pred_noise)),
             torch.log1p(self._local_rms(target_noise)),
         )
-        spectrum_loss = F.l1_loss(
-            self._spectrum_profile(pred_noise), self._spectrum_profile(target_noise)
+        pred_spectrum, pred_spectrum_energy = self._spectrum_statistics(pred_noise)
+        target_spectrum, target_spectrum_energy = self._spectrum_statistics(
+            target_noise
+        )
+        spectrum_loss = F.l1_loss(pred_spectrum, target_spectrum)
+        spectrum_energy_loss = F.l1_loss(
+            pred_spectrum_energy, target_spectrum_energy
         )
         correlation_loss = F.l1_loss(
             self._autocorrelation(pred_noise), self._autocorrelation(target_noise)
+        )
+        mean_loss = F.l1_loss(
+            self._local_mean(pred_noise), self._local_mean(target_noise)
         )
 
         return (
             self.level_weight * level_loss
             + self.local_weight * (local_loss + area_level_loss)
             + self.spectrum_weight * spectrum_loss
+            + self.spectrum_energy_weight * spectrum_energy_loss
             + self.correlation_weight * correlation_loss
+            + self.mean_weight * mean_loss
         )
 
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
