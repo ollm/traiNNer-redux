@@ -75,12 +75,62 @@ class _UpsampleWithSkip(nn.Module):
         return self.blocks(self.up(x) + self.skip(skip))
 
 
+class _StochasticNoiseInjection(nn.Module):
+    def __init__(self, dim: int, out_ch: int, strength: float, noise_layers: int) -> None:
+        super().__init__()
+        layers: list[nn.Module] = [nn.Conv2d(dim * 2, dim, 3, padding=1)]
+        for _ in range(noise_layers - 1):
+            layers.extend((nn.GELU(), nn.Conv2d(dim, dim, 3, padding=1)))
+        layers.extend((nn.GELU(), nn.Conv2d(dim, out_ch, 3, padding=1)))
+        self.noise_features = nn.Sequential(*layers)
+        self.gate = nn.Sequential(nn.Conv2d(dim, out_ch, 1), nn.Sigmoid())
+        self.log_strength = nn.Parameter(
+            torch.tensor(strength).expm1().log()
+        )
+
+    def forward(self, features: Tensor) -> Tensor:
+        height, width = features.shape[-2:]
+        fine_grain = torch.randn(
+            features.shape[0],
+            1,
+            height,
+            width,
+            device=features.device,
+            dtype=features.dtype,
+        )
+        fine_rgb = torch.randn_like(features)
+        fine_noise = (fine_grain.expand_as(features) + fine_rgb) * 2**-0.5
+        coarse_height = max(1, (height + 1) // 2)
+        coarse_width = max(1, (width + 1) // 2)
+        coarse_grain = torch.randn(
+            features.shape[0],
+            1,
+            coarse_height,
+            coarse_width,
+            device=features.device,
+            dtype=features.dtype,
+        )
+        coarse_grain = F.interpolate(
+            coarse_grain, size=(height, width), mode="bilinear", align_corners=False
+        )
+        coarse_rgb = torch.randn_like(features)
+        coarse_noise = (
+            coarse_grain.expand_as(features) + coarse_rgb
+        ) * 2**-0.5
+        generated_noise = self.noise_features(
+            torch.cat((fine_noise, coarse_noise), dim=1)
+        )
+        strength = F.softplus(self.log_strength)
+        return strength * self.gate(features) * generated_noise
+
+
 @ARCH_REGISTRY.register()
 class MoSRv2MultiScale(nn.Module):
     """Shared dynamic-resolution MoSRv2 encoder-decoder.
 
     ``task='panels'`` emits RGB residuals with a mask logit in G. ``task='descreen'``
-    emits an unconstrained residual for all RGB channels.
+    emits an unconstrained residual for all RGB channels. ``task='noise'`` adds a
+    learned, stochastic RGB residual for natural image noise synthesis.
     """
 
     def __init__(
@@ -98,11 +148,13 @@ class MoSRv2MultiScale(nn.Module):
         rms_norm: bool = False,
         use_edge_refinement: bool = True,
         edge_refinement_blocks: int = 1,
+        noise_strength: float = 0.05,
+        noise_layers: int = 2,
         gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
-        if task not in ("panels", "descreen"):
-            raise ValueError("task must be either 'panels' or 'descreen'.")
+        if task not in ("panels", "descreen", "noise"):
+            raise ValueError("task must be 'panels', 'descreen', or 'noise'.")
         if scale != 1:
             raise ValueError("MoSRv2MultiScale only supports scale=1.")
         if in_ch != 3 or out_ch != 3:
@@ -135,6 +187,10 @@ class MoSRv2MultiScale(nn.Module):
             )
         if expansion_ratio <= 0:
             raise ValueError("expansion_ratio must be positive.")
+        if noise_strength <= 0:
+            raise ValueError("noise_strength must be positive.")
+        if noise_layers < 1:
+            raise ValueError("noise_layers must be at least 1.")
 
         dims = tuple(encoder_dims)
         self.task = task
@@ -192,6 +248,11 @@ class MoSRv2MultiScale(nn.Module):
             else nn.Identity()
         )
         self.to_image = nn.Conv2d(dims[0], out_ch, 3, padding=1)
+        self.noise_injection = (
+            _StochasticNoiseInjection(dims[0], out_ch, noise_strength, noise_layers)
+            if task == "noise"
+            else nn.Identity()
+        )
 
     def _pad_input(self, x: Tensor) -> tuple[Tensor, int, int]:
         height, width = x.shape[-2:]
@@ -222,7 +283,9 @@ class MoSRv2MultiScale(nn.Module):
             x = decoder(x, skip)
 
         residual = self.to_image(self.edge_refinement(x))
-        if self.task == "panels":
+        if self.task == "noise":
+            output = input_rgb + residual + self.noise_injection(x)
+        elif self.task == "panels":
             output = torch.cat(
                 (
                     input_rgb[:, 0:1] + residual[:, 0:1],
