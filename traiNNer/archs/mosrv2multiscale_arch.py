@@ -76,53 +76,47 @@ class _UpsampleWithSkip(nn.Module):
         return self.blocks(self.up(x) + self.skip(skip))
 
 
-class _StochasticNoiseInjection(nn.Module):
+class _DeterministicNoiseInjection(nn.Module):
     def __init__(self, dim: int, out_ch: int, strength: float, noise_layers: int) -> None:
         super().__init__()
+        self.condition = nn.Sequential(
+            nn.Conv2d(dim, dim, 1),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.GELU(),
+        )
+        self.coarse_condition = nn.Conv2d(dim, dim, 3, padding=1)
         layers: list[nn.Module] = [nn.Conv2d(dim * 2, dim, 3, padding=1)]
         for _ in range(noise_layers - 1):
             layers.extend((nn.GELU(), nn.Conv2d(dim, dim, 3, padding=1)))
         layers.extend((nn.GELU(), nn.Conv2d(dim, out_ch, 3, padding=1)))
         self.noise_features = nn.Sequential(*layers)
-        self.gate = nn.Sequential(nn.Conv2d(dim, out_ch, 1), nn.Sigmoid())
+        self.gate = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(dim, out_ch, 1),
+            nn.Sigmoid(),
+        )
         self.log_strength = nn.Parameter(
             torch.tensor(strength).expm1().log()
         )
 
     def forward(self, features: Tensor) -> Tensor:
         height, width = features.shape[-2:]
-        fine_grain = torch.randn(
-            features.shape[0],
-            1,
-            height,
-            width,
-            device=features.device,
-            dtype=features.dtype,
+        condition = self.condition(features)
+        coarse = F.avg_pool2d(features, kernel_size=2, stride=2, ceil_mode=True)
+        coarse = F.interpolate(
+            self.coarse_condition(coarse),
+            size=(height, width),
+            mode="bilinear",
+            align_corners=False,
         )
-        fine_rgb = torch.randn_like(features)
-        fine_noise = (fine_grain.expand_as(features) + fine_rgb) * 2**-0.5
-        coarse_height = max(1, (height + 1) // 2)
-        coarse_width = max(1, (width + 1) // 2)
-        coarse_grain = torch.randn(
-            features.shape[0],
-            1,
-            coarse_height,
-            coarse_width,
-            device=features.device,
-            dtype=features.dtype,
-        )
-        coarse_grain = F.interpolate(
-            coarse_grain, size=(height, width), mode="bilinear", align_corners=False
-        )
-        coarse_rgb = torch.randn_like(features)
-        coarse_noise = (
-            coarse_grain.expand_as(features) + coarse_rgb
-        ) * 2**-0.5
-        generated_noise = self.noise_features(
-            torch.cat((fine_noise, coarse_noise), dim=1)
+        generated_noise = self.noise_features(torch.cat((condition, coarse), dim=1))
+        generated_noise = generated_noise - generated_noise.mean(
+            dim=(-2, -1), keepdim=True
         )
         strength = F.softplus(self.log_strength)
-        return strength * self.gate(features) * generated_noise
+        return strength * self.gate(condition) * generated_noise
 
 
 @ARCH_REGISTRY.register()
@@ -131,7 +125,7 @@ class MoSRv2MultiScale(nn.Module):
 
     ``task='panels'`` emits RGB residuals with a mask logit in G. ``task='descreen'``
     emits an unconstrained residual for all RGB channels. ``task='noise'`` adds a
-    learned, stochastic RGB residual for natural image noise synthesis.
+    learned, deterministic RGB residual conditioned on local and reduced-resolution features.
     """
 
     def __init__(
@@ -264,7 +258,7 @@ class MoSRv2MultiScale(nn.Module):
             else nn.Identity()
         )
         self.noise_injection = (
-            _StochasticNoiseInjection(dims[0], out_ch, noise_strength, noise_layers)
+            _DeterministicNoiseInjection(dims[0], out_ch, noise_strength, noise_layers)
             if task == "noise"
             else nn.Identity()
         )

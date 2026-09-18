@@ -26,14 +26,16 @@ def test_mosrv2noise_preserves_shape_and_gradients() -> None:
     assert torch.isfinite(input_tensor.grad).all()
 
 
-def test_mosrv2noise_is_stochastic_in_training() -> None:
+def test_mosrv2noise_is_deterministic_and_traceable() -> None:
     model = _small_model()
     input_tensor = torch.randn(1, 3, 32, 32)
 
     first = model(input_tensor)
     second = model(input_tensor)
 
-    assert not torch.allclose(first, second)
+    assert torch.allclose(first, second)
+    traced = torch.jit.trace(model, input_tensor)
+    assert "randn" not in str(traced.graph)
 
 
 def test_mosrv2noise_validates_strength() -> None:
