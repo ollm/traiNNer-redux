@@ -107,19 +107,6 @@ EXCLUDE_ARCH_SCALES = {
         {"scale": 3, "extra_arch_params": {}},
         {"scale": 4, "extra_arch_params": {}},
     ],
-    "mosrv2panels": [
-        {"scale": 2, "extra_arch_params": {}},
-        {"scale": 3, "extra_arch_params": {}},
-        {"scale": 4, "extra_arch_params": {}},
-    ],
-    "mosrv2descreen": [
-        {"scale": 2, "extra_arch_params": {}},
-        {"scale": 3, "extra_arch_params": {}},
-        {"scale": 4, "extra_arch_params": {}},
-    ],
-    "mosrv2noise": [
-        {"scale": 1, "extra_arch_params": {}},
-    ],
     "fdat_medium": [{"scale": 1, "extra_arch_params": {}}],
     "fdat_large": [{"scale": 1, "extra_arch_params": {}}],
     "fdat_xl": [{"scale": 1, "extra_arch_params": {}}],

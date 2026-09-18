@@ -36,5 +36,5 @@ def test_mosrv2descreen_validates_scale_lists() -> None:
     with pytest.raises(ValueError, match="decoder_blocks"):
         _small_model(decoder_blocks=(1, 1))
 
-    with pytest.raises(ValueError, match="scale=1"):
-        _small_model(scale=2)
+    with pytest.raises(ValueError, match="scale >= 1"):
+        _small_model(scale=0)

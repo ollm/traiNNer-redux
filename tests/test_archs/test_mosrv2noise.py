@@ -52,3 +52,15 @@ def test_mosrv2noise_validates_layer_count() -> None:
         assert "noise_layers" in str(error)
     else:
         raise AssertionError("noise_layers=0 should be rejected")
+
+
+def test_mosrv2noise_supports_super_resolution() -> None:
+    model = _small_model(scale=2)
+    input_tensor = torch.randn(1, 3, 17, 23, requires_grad=True)
+
+    output = model(input_tensor)
+
+    assert output.shape == (1, 3, 34, 46)
+    output.square().mean().backward()
+    assert input_tensor.grad is not None
+    assert torch.isfinite(input_tensor.grad).all()

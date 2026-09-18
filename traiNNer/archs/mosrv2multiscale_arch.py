@@ -5,6 +5,7 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
+from traiNNer.archs.arch_util import SampleMods3, UniUpsampleV3
 from traiNNer.archs.mosrv2_arch import GatedCNNBlock
 from traiNNer.utils.registry import ARCH_REGISTRY
 
@@ -150,13 +151,15 @@ class MoSRv2MultiScale(nn.Module):
         edge_refinement_blocks: int = 1,
         noise_strength: float = 0.05,
         noise_layers: int = 2,
+        upsampler: SampleMods3 = "pixelshuffledirect",
+        upsampler_mid_dim: int = 64,
         gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         if task not in ("panels", "descreen", "noise"):
             raise ValueError("task must be 'panels', 'descreen', or 'noise'.")
-        if scale != 1:
-            raise ValueError("MoSRv2MultiScale only supports scale=1.")
+        if scale < 1:
+            raise ValueError("MoSRv2MultiScale requires scale >= 1.")
         if in_ch != 3 or out_ch != 3:
             raise ValueError(
                 "MoSRv2MultiScale requires exactly 3 input and output channels."
@@ -194,6 +197,7 @@ class MoSRv2MultiScale(nn.Module):
 
         dims = tuple(encoder_dims)
         self.task = task
+        self.scale = scale
         self.num_downsamples = num_downsamples
         self.pad_factor = 2**num_downsamples
 
@@ -248,6 +252,17 @@ class MoSRv2MultiScale(nn.Module):
             else nn.Identity()
         )
         self.to_image = nn.Conv2d(dims[0], out_ch, 3, padding=1)
+        self.upsampler = (
+            UniUpsampleV3(
+                upsampler,
+                scale,
+                dims[0],
+                out_ch,
+                upsampler_mid_dim,
+            )
+            if scale > 1
+            else nn.Identity()
+        )
         self.noise_injection = (
             _StochasticNoiseInjection(dims[0], out_ch, noise_strength, noise_layers)
             if task == "noise"
@@ -282,18 +297,36 @@ class MoSRv2MultiScale(nn.Module):
         for decoder, skip in zip(self.decoder, reversed(skips[:-1]), strict=True):
             x = decoder(x, skip)
 
-        residual = self.to_image(self.edge_refinement(x))
+        refined = self.edge_refinement(x)
+        if self.scale == 1:
+            residual = self.to_image(refined)
+            output_base = input_rgb
+            noise_features = x
+        else:
+            residual = self.upsampler(refined)
+            output_base = F.interpolate(
+                input_rgb,
+                scale_factor=self.scale,
+                mode="bilinear",
+                align_corners=False,
+            )
+            noise_features = F.interpolate(
+                x,
+                size=residual.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
         if self.task == "noise":
-            output = input_rgb + residual + self.noise_injection(x)
+            output = output_base + residual + self.noise_injection(noise_features)
         elif self.task == "panels":
             output = torch.cat(
                 (
-                    input_rgb[:, 0:1] + residual[:, 0:1],
+                    output_base[:, 0:1] + residual[:, 0:1],
                     residual[:, 1:2],
-                    input_rgb[:, 2:3] + residual[:, 2:3],
+                    output_base[:, 2:3] + residual[:, 2:3],
                 ),
                 dim=1,
             )
         else:
-            output = input_rgb + residual
-        return output[:, :, :height, :width]
+            output = output_base + residual
+        return output[:, :, : height * self.scale, : width * self.scale]
