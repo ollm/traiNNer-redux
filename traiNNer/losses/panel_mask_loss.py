@@ -14,6 +14,9 @@ class PanelMaskLoss(nn.Module):
         rgb_weight: float = 1.0,
         mask_bce_weight: float = 2.0,
         mask_dice_weight: float = 1.0,
+        mask_gradient_weight: float = 1.0,
+        interior_smoothness_weight: float = 0.5,
+        mask_positive_weight: float = 2.0,
         eps: float = 1e-6,
         charbonnier_eps: float = 1e-12,
     ) -> None:
@@ -22,6 +25,9 @@ class PanelMaskLoss(nn.Module):
         self.rgb_weight = rgb_weight
         self.mask_bce_weight = mask_bce_weight
         self.mask_dice_weight = mask_dice_weight
+        self.mask_gradient_weight = mask_gradient_weight
+        self.interior_smoothness_weight = interior_smoothness_weight
+        self.mask_positive_weight = mask_positive_weight
         self.eps = eps
         self.charbonnier_eps = charbonnier_eps
 
@@ -51,7 +57,15 @@ class PanelMaskLoss(nn.Module):
         )
         mask_target = mask_target / target_scale
 
-        bce_loss = F.binary_cross_entropy_with_logits(mask_logits, mask_target)
+        positive_fraction = mask_target.mean().detach()
+        class_balance = ((1 - positive_fraction) / (positive_fraction + self.eps)).clamp(
+            min=1.0, max=self.mask_positive_weight
+        )
+        bce = F.binary_cross_entropy_with_logits(
+            mask_logits, mask_target, reduction="none"
+        )
+        bce_weights = torch.where(mask_target > 0.5, class_balance, 1.0)
+        bce_loss = (bce * bce_weights).mean()
 
         mask_probabilities = torch.sigmoid(mask_logits)
         pred_flat = mask_probabilities.flatten(1)
@@ -62,8 +76,32 @@ class PanelMaskLoss(nn.Module):
         )
         dice_loss = 1 - dice.mean()
 
+        pred_dx = mask_probabilities[:, :, :, 1:] - mask_probabilities[:, :, :, :-1]
+        target_dx = mask_target[:, :, :, 1:] - mask_target[:, :, :, :-1]
+        pred_dy = mask_probabilities[:, :, 1:, :] - mask_probabilities[:, :, :-1, :]
+        target_dy = mask_target[:, :, 1:, :] - mask_target[:, :, :-1, :]
+        gradient_loss = F.l1_loss(pred_dx, target_dx) + F.l1_loss(pred_dy, target_dy)
+
+        panel_x_weight = (1 - mask_target[:, :, :, 1:]).clamp_min(0)
+        panel_x_weight = panel_x_weight * (1 - mask_target[:, :, :, :-1]).clamp_min(0)
+        panel_y_weight = (1 - mask_target[:, :, 1:, :]).clamp_min(0)
+        panel_y_weight = panel_y_weight * (1 - mask_target[:, :, :-1, :]).clamp_min(0)
+        interior_smoothness = (
+            (torch.abs(pred_dx) * panel_x_weight).sum()
+            + (torch.abs(pred_dy) * panel_y_weight).sum()
+        ) / (panel_x_weight.sum() + panel_y_weight.sum() + self.eps)
+
         return (
             self.rgb_weight * rgb_loss
             + self.mask_bce_weight * bce_loss
             + self.mask_dice_weight * dice_loss
+            + self.mask_gradient_weight * gradient_loss
+            + self.interior_smoothness_weight * interior_smoothness
         )
+
+
+def panel_mask(loss_weight: float, **kwargs: object) -> PanelMaskLoss:
+    return PanelMaskLoss(loss_weight=loss_weight, **kwargs)
+
+
+LOSS_REGISTRY.register(panel_mask)

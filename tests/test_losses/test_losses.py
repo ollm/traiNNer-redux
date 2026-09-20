@@ -18,6 +18,7 @@ from traiNNer.losses.dists_loss import DISTSLoss
 from traiNNer.losses.ldl_loss import LDLLoss
 from traiNNer.losses.mssim_loss import MSSIMLoss, SSIMLoss
 from traiNNer.losses.noise_statistics_loss import NoiseStatisticsLoss
+from traiNNer.losses.panel_mask_loss import PanelMaskLoss
 from traiNNer.losses.perceptual_fp16_loss import (
     VGG19_CONV_LAYER_WEIGHTS,
     VGG19_RELU_LAYER_WEIGHTS,
@@ -219,6 +220,41 @@ class TestLosses:
         loss_value.backward()
         assert pred.grad is not None
         assert torch.isfinite(pred.grad).all()
+
+    def test_panel_mask_loss_prefers_clean_connected_edges(self) -> None:
+        target = torch.zeros(1, 3, 16, 16)
+        target[:, 1, 7, 2:14] = 1.0
+
+        clean_logits = torch.full_like(target[:, 1:2], -8.0)
+        clean_logits[:, :, 7, 2:14] = 8.0
+
+        gap_logits = clean_logits.clone()
+        gap_logits[:, :, 7, 7] = -8.0
+
+        internal_line_logits = clean_logits.clone()
+        internal_line_logits[:, :, 5:7, 5:11] = 8.0
+
+        clean = target.clone()
+        clean[:, 1:2] = clean_logits
+        gap = target.clone()
+        gap[:, 1:2] = gap_logits
+        internal_line = target.clone()
+        internal_line[:, 1:2] = internal_line_logits
+
+        loss = PanelMaskLoss(
+            loss_weight=1.0,
+            rgb_weight=0.0,
+            mask_gradient_weight=1.0,
+            interior_smoothness_weight=1.0,
+        )
+
+        clean_value = loss(clean, target)
+        gap_value = loss(gap, target)
+        internal_line_value = loss(internal_line, target)
+
+        assert clean_value < gap_value
+        assert clean_value < internal_line_value
+        assert internal_line_value > gap_value
 
     def test_msssim(self) -> None:
         white = torch.ones(1, 3, 256, 256)
