@@ -162,6 +162,7 @@ class MoSRv2MultiScale(nn.Module):
         rms_norm: bool = False,
         use_edge_refinement: bool = True,
         edge_refinement_blocks: int = 1,
+        mask_head_blocks: int = 2,
         noise_strength: float = 0.05,
         noise_layers: int = 2,
         upsampler: SampleMods3 = "pixelshuffledirect",
@@ -203,6 +204,8 @@ class MoSRv2MultiScale(nn.Module):
             raise ValueError(
                 "context_blocks and edge_refinement_blocks must be non-negative."
             )
+        if mask_head_blocks < 0:
+            raise ValueError("mask_head_blocks must be non-negative.")
         if expansion_ratio <= 0:
             raise ValueError("expansion_ratio must be positive.")
         if noise_strength <= 0:
@@ -266,8 +269,18 @@ class MoSRv2MultiScale(nn.Module):
             if use_edge_refinement
             else nn.Identity()
         )
-        self.to_image = nn.Conv2d(dims[0], out_ch, 3, padding=1)
-        self.to_mask = nn.Conv2d(dims[0], 1, 3, padding=1)
+        if task == "panels2":
+            mask_head_layers: list[nn.Module] = []
+            for _ in range(mask_head_blocks):
+                mask_head_layers.extend(
+                    (nn.Conv2d(dims[0], dims[0], 3, padding=1), nn.GELU())
+                )
+            mask_head_layers.append(nn.Conv2d(dims[0], 1, 3, padding=1))
+            self.to_image = nn.Identity()
+            self.to_mask = nn.Sequential(*mask_head_layers)
+        else:
+            self.to_image = nn.Conv2d(dims[0], out_ch, 3, padding=1)
+            self.to_mask = nn.Identity()
         self.upsampler = (
             UniUpsampleV3(
                 upsampler,

@@ -248,7 +248,6 @@ class TestLosses:
 
         loss = PanelMaskLoss(
             loss_weight=1.0,
-            rgb_weight=0.0,
             mask_gradient_weight=1.0,
             interior_smoothness_weight=1.0,
         )
@@ -270,7 +269,7 @@ class TestLosses:
         prediction = torch.zeros_like(target)
         prediction[:, 1, 3, 2:6] = 8.0
 
-        loss = PanelMaskLoss(loss_weight=1.0, rgb_weight=0.0)
+        loss = PanelMaskLoss(loss_weight=1.0)
 
         assert torch.isfinite(loss(prediction, target))
 

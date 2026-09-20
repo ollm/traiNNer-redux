@@ -69,3 +69,14 @@ def test_mosrv2panels2_preserves_input_rgb_channels() -> None:
 def test_mosrv2panels2_requires_scale_one() -> None:
     with pytest.raises(ValueError, match="scale=1"):
         MoSRv2Panels2(scale=2)
+
+
+def test_mosrv2panels2_configures_mask_head_depth() -> None:
+    model = MoSRv2Panels2(
+        encoder_dims=(8, 12, 16),
+        encoder_blocks=(1, 1, 1),
+        decoder_blocks=(1, 1, 1),
+        mask_head_blocks=3,
+    )
+
+    assert len(model.to_mask) == 7
