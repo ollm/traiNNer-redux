@@ -231,6 +231,9 @@ class TestLosses:
         gap_logits = clean_logits.clone()
         gap_logits[:, :, 7, 7] = -8.0
 
+        endpoint_gap_logits = clean_logits.clone()
+        endpoint_gap_logits[:, :, 7, 2] = -8.0
+
         internal_line_logits = clean_logits.clone()
         internal_line_logits[:, :, 5:7, 5:11] = 8.0
 
@@ -238,6 +241,8 @@ class TestLosses:
         clean[:, 1:2] = clean_logits
         gap = target.clone()
         gap[:, 1:2] = gap_logits
+        endpoint_gap = target.clone()
+        endpoint_gap[:, 1:2] = endpoint_gap_logits
         internal_line = target.clone()
         internal_line[:, 1:2] = internal_line_logits
 
@@ -250,10 +255,12 @@ class TestLosses:
 
         clean_value = loss(clean, target)
         gap_value = loss(gap, target)
+        endpoint_gap_value = loss(endpoint_gap, target)
         internal_line_value = loss(internal_line, target)
 
         assert clean_value < gap_value
         assert clean_value < internal_line_value
+        assert gap_value > endpoint_gap_value
         assert internal_line_value > gap_value
 
     def test_msssim(self) -> None:

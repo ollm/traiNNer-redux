@@ -16,6 +16,7 @@ class PanelMaskLoss(nn.Module):
         mask_dice_weight: float = 1.0,
         mask_gradient_weight: float = 1.0,
         interior_smoothness_weight: float = 0.5,
+        border_continuity_weight: float = 0.5,
         mask_positive_weight: float = 2.0,
         eps: float = 1e-6,
         charbonnier_eps: float = 1e-12,
@@ -27,6 +28,7 @@ class PanelMaskLoss(nn.Module):
         self.mask_dice_weight = mask_dice_weight
         self.mask_gradient_weight = mask_gradient_weight
         self.interior_smoothness_weight = interior_smoothness_weight
+        self.border_continuity_weight = border_continuity_weight
         self.mask_positive_weight = mask_positive_weight
         self.eps = eps
         self.charbonnier_eps = charbonnier_eps
@@ -67,6 +69,14 @@ class PanelMaskLoss(nn.Module):
         bce_weights = torch.where(mask_target > 0.5, class_balance, 1.0)
         bce_loss = (bce * bce_weights).mean()
 
+        neighbor_kernel = mask_target.new_ones((1, 1, 3, 3))
+        neighbor_kernel[:, :, 1, 1] = 0
+        target_neighbors = F.conv2d(mask_target, neighbor_kernel, padding=1)
+        continuity_mask = mask_target * (target_neighbors > 0).to(mask_target.dtype)
+        continuity_loss = (bce * continuity_mask).sum() / (
+            continuity_mask.sum() + self.eps
+        )
+
         mask_probabilities = torch.sigmoid(mask_logits)
         pred_flat = mask_probabilities.flatten(1)
         target_flat = mask_target.flatten(1)
@@ -97,6 +107,7 @@ class PanelMaskLoss(nn.Module):
             + self.mask_dice_weight * dice_loss
             + self.mask_gradient_weight * gradient_loss
             + self.interior_smoothness_weight * interior_smoothness
+            + self.border_continuity_weight * continuity_loss
         )
 
 
