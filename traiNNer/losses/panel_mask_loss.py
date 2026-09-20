@@ -50,8 +50,8 @@ class PanelMaskLoss(nn.Module):
             raise ValueError("PanelMaskLoss expects exactly 3 channels (RGB).")
 
         rgb_loss = charbonnier_loss(
-            pred[:, (0, 2)],
-            target[:, (0, 2)],
+            pred[:, (0, 2)].float(),
+            target[:, (0, 2)].float(),
             eps=self.charbonnier_eps,
             reduction="mean",
         )
@@ -59,7 +59,7 @@ class PanelMaskLoss(nn.Module):
         mask_logits = pred[:, 1:2]
         mask_target = target[:, 1:2]
         target_scale = torch.where(
-            mask_target.detach().amax() > 1,
+            mask_target.detach().amax(dim=(1, 2, 3), keepdim=True) > 1,
             mask_target.new_tensor(255.0),
             mask_target.new_tensor(1.0),
         )

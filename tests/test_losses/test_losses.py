@@ -263,6 +263,17 @@ class TestLosses:
         assert gap_value > endpoint_gap_value
         assert internal_line_value > gap_value
 
+    def test_panel_mask_loss_normalizes_each_sample_independently(self) -> None:
+        target = torch.zeros(2, 3, 8, 8)
+        target[0, 1, 3, 2:6] = 255.0
+        target[1, 1, 3, 2:6] = 1.0
+        prediction = torch.zeros_like(target)
+        prediction[:, 1, 3, 2:6] = 8.0
+
+        loss = PanelMaskLoss(loss_weight=1.0, rgb_weight=0.0)
+
+        assert torch.isfinite(loss(prediction, target))
+
     def test_msssim(self) -> None:
         white = torch.ones(1, 3, 256, 256)
         black = torch.zeros(1, 3, 256, 256)
