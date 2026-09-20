@@ -141,7 +141,8 @@ class _DeterministicNoiseInjection(nn.Module):
 class MoSRv2MultiScale(nn.Module):
     """Shared dynamic-resolution MoSRv2 encoder-decoder.
 
-    ``task='panels'`` emits RGB residuals with a mask logit in G. ``task='descreen'``
+    ``task='panels'`` emits RGB residuals with a mask logit in G. ``task='panels2'``
+    copies R/B from the input and emits only a mask logit in G. ``task='descreen'``
     emits an unconstrained residual for all RGB channels. ``task='noise'`` adds a
     learned, deterministic RGB residual conditioned on local and reduced-resolution features.
     """
@@ -168,10 +169,12 @@ class MoSRv2MultiScale(nn.Module):
         gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
-        if task not in ("panels", "descreen", "noise"):
-            raise ValueError("task must be 'panels', 'descreen', or 'noise'.")
+        if task not in ("panels", "panels2", "descreen", "noise"):
+            raise ValueError("task must be 'panels', 'panels2', 'descreen', or 'noise'.")
         if scale < 1:
             raise ValueError("MoSRv2MultiScale requires scale >= 1.")
+        if task == "panels2" and scale != 1:
+            raise ValueError("task='panels2' requires scale=1.")
         if in_ch != 3 or out_ch != 3:
             raise ValueError(
                 "MoSRv2MultiScale requires exactly 3 input and output channels."
@@ -264,6 +267,7 @@ class MoSRv2MultiScale(nn.Module):
             else nn.Identity()
         )
         self.to_image = nn.Conv2d(dims[0], out_ch, 3, padding=1)
+        self.to_mask = nn.Conv2d(dims[0], 1, 3, padding=1)
         self.upsampler = (
             UniUpsampleV3(
                 upsampler,
@@ -312,6 +316,13 @@ class MoSRv2MultiScale(nn.Module):
             x = decoder(x, skip)
 
         refined = self.edge_refinement(x)
+        if self.task == "panels2":
+            mask_logits = self.to_mask(refined)
+            output = torch.cat(
+                (input_rgb[:, 0:1], mask_logits, input_rgb[:, 2:3]), dim=1
+            )
+            return output[:, :, :height, :width]
+
         if self.scale == 1:
             residual = self.to_image(refined)
             output_base = input_rgb
