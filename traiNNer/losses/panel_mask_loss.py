@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F  # noqa: N812
@@ -16,7 +18,9 @@ class PanelMaskLoss(nn.Module):
         mask_dice_weight: float = 1.0,
         mask_gradient_weight: float = 1.0,
         interior_smoothness_weight: float = 0.5,
-        border_continuity_weight: float = 0.5,
+        border_continuity_weight: float = 1.0,
+        mask_multiscale_weight: float = 0.25,
+        mask_curvature_weight: float = 0.25,
         mask_positive_weight: float = 2.0,
         eps: float = 1e-6,
         charbonnier_eps: float = 1e-12,
@@ -29,6 +33,8 @@ class PanelMaskLoss(nn.Module):
         self.mask_gradient_weight = mask_gradient_weight
         self.interior_smoothness_weight = interior_smoothness_weight
         self.border_continuity_weight = border_continuity_weight
+        self.mask_multiscale_weight = mask_multiscale_weight
+        self.mask_curvature_weight = mask_curvature_weight
         self.mask_positive_weight = mask_positive_weight
         self.eps = eps
         self.charbonnier_eps = charbonnier_eps
@@ -101,6 +107,44 @@ class PanelMaskLoss(nn.Module):
             + (torch.abs(pred_dy) * panel_y_weight).sum()
         ) / (panel_x_weight.sum() + panel_y_weight.sum() + self.eps)
 
+        if min(mask_probabilities.shape[-2:]) >= 3:
+            pred_dxx = (
+                mask_probabilities[:, :, :, 2:]
+                - 2 * mask_probabilities[:, :, :, 1:-1]
+                + mask_probabilities[:, :, :, :-2]
+            )
+            target_dxx = (
+                mask_target[:, :, :, 2:]
+                - 2 * mask_target[:, :, :, 1:-1]
+                + mask_target[:, :, :, :-2]
+            )
+            pred_dyy = (
+                mask_probabilities[:, :, 2:, :]
+                - 2 * mask_probabilities[:, :, 1:-1, :]
+                + mask_probabilities[:, :, :-2, :]
+            )
+            target_dyy = (
+                mask_target[:, :, 2:, :]
+                - 2 * mask_target[:, :, 1:-1, :]
+                + mask_target[:, :, :-2, :]
+            )
+            curvature_loss = F.l1_loss(pred_dxx, target_dxx) + F.l1_loss(
+                pred_dyy, target_dyy
+            )
+        else:
+            curvature_loss = mask_probabilities.new_zeros(())
+
+        multiscale_loss = mask_probabilities.new_zeros(())
+        for scale in (2, 4):
+            if min(mask_probabilities.shape[-2:]) >= scale:
+                coarse_prediction = F.avg_pool2d(
+                    mask_probabilities, kernel_size=scale, stride=scale
+                )
+                coarse_target = F.avg_pool2d(mask_target, kernel_size=scale, stride=scale)
+                multiscale_loss = multiscale_loss + F.l1_loss(
+                    coarse_prediction, coarse_target
+                )
+
         return (
             self.rgb_weight * rgb_loss
             + self.mask_bce_weight * bce_loss
@@ -108,10 +152,12 @@ class PanelMaskLoss(nn.Module):
             + self.mask_gradient_weight * gradient_loss
             + self.interior_smoothness_weight * interior_smoothness
             + self.border_continuity_weight * continuity_loss
+            + self.mask_multiscale_weight * multiscale_loss
+            + self.mask_curvature_weight * curvature_loss
         )
 
 
-def panel_mask(loss_weight: float, **kwargs: object) -> PanelMaskLoss:
+def panel_mask(loss_weight: float, **kwargs: Any) -> PanelMaskLoss:
     return PanelMaskLoss(loss_weight=loss_weight, **kwargs)
 
 
