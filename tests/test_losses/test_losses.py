@@ -18,6 +18,7 @@ from traiNNer.losses.dists_loss import DISTSLoss
 from traiNNer.losses.ldl_loss import LDLLoss
 from traiNNer.losses.mssim_loss import MSSIMLoss, SSIMLoss
 from traiNNer.losses.noise_statistics_loss import NoiseStatisticsLoss
+from traiNNer.losses.panel_mask_basic_loss import PanelMaskBasicLoss
 from traiNNer.losses.panel_mask_loss import PanelMaskLoss
 from traiNNer.losses.perceptual_fp16_loss import (
     VGG19_CONV_LAYER_WEIGHTS,
@@ -261,6 +262,15 @@ class TestLosses:
         assert clean_value < internal_line_value
         assert gap_value > endpoint_gap_value
         assert internal_line_value > gap_value
+
+    def test_panel_mask_loss_variants_register_separately(self) -> None:
+        from traiNNer.losses import build_loss
+
+        basic_loss = build_loss({"type": "panel_mask_basic", "loss_weight": 1.0})
+        current_loss = build_loss({"type": "panel_mask", "loss_weight": 1.0})
+
+        assert isinstance(basic_loss, PanelMaskBasicLoss)
+        assert isinstance(current_loss, PanelMaskLoss)
 
     def test_panel_mask_loss_normalizes_each_sample_independently(self) -> None:
         target = torch.zeros(2, 3, 8, 8)
