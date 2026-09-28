@@ -99,6 +99,7 @@ class MoSRv2Panels3(nn.Module):
 
     def __init__(
         self,
+        scale: int = 1,
         encoder_dims: Sequence[int] = (16, 24, 40),
         encoder_blocks: Sequence[int] = (2, 4, 8),
         decoder_blocks: Sequence[int] = (4, 3, 2),
@@ -110,6 +111,8 @@ class MoSRv2Panels3(nn.Module):
         gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
+        if scale != 1:
+            raise ValueError("MoSRv2Panels3 requires scale=1.")
         if num_downsamples < 0:
             raise ValueError("num_downsamples must be non-negative.")
 
