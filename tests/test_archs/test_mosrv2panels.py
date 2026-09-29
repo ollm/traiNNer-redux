@@ -4,6 +4,7 @@ import torch
 from traiNNer.archs.mosrv2multiscale_arch import MoSRv2MultiScale
 from traiNNer.archs.mosrv2panels_arch import MoSRv2Panels
 from traiNNer.archs.mosrv2panels2_arch import MoSRv2Panels2
+from traiNNer.archs.mosrv2panels4_arch import MoSRv2Panels4
 
 
 def _small_model(**kwargs: object) -> MoSRv2Panels:
@@ -80,3 +81,38 @@ def test_mosrv2panels2_configures_mask_head_depth() -> None:
     )
 
     assert len(model.to_mask) == 7
+
+
+def test_mosrv2panels4_preserves_input_rgb_channels_and_backpropagates() -> None:
+    model = MoSRv2Panels4(
+        detail_dim=8,
+        detail_blocks=1,
+        context_dims=(8, 12, 16),
+        context_encoder_blocks=(1, 1, 1),
+        context_decoder_blocks=(1, 1),
+        context_blocks=1,
+        fusion_blocks=1,
+        mask_head_blocks=1,
+    )
+    input_tensor = torch.randn(1, 3, 33, 47, requires_grad=True)
+
+    output = model(input_tensor)
+
+    assert output.shape == input_tensor.shape
+    assert torch.equal(output[:, 0], input_tensor[:, 0])
+    assert torch.equal(output[:, 2], input_tensor[:, 2])
+    output[:, 1].square().mean().backward()
+    assert input_tensor.grad is not None
+    assert torch.isfinite(input_tensor.grad).all()
+
+
+def test_mosrv2panels4_validates_scale_and_context_levels() -> None:
+    with pytest.raises(ValueError, match="scale=1"):
+        MoSRv2Panels4(scale=2)
+
+    with pytest.raises(ValueError, match="context_decoder_blocks"):
+        MoSRv2Panels4(
+            context_dims=(8, 16),
+            context_encoder_blocks=(1, 1),
+            context_decoder_blocks=(1, 1),
+        )
