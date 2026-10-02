@@ -1,11 +1,13 @@
 import pytest
 import torch
-
 from traiNNer.archs.mosrv2multiscale_arch import MoSRv2MultiScale
-from traiNNer.archs.mosrv2panels_arch import MoSRv2Panels
 from traiNNer.archs.mosrv2panels2_arch import MoSRv2Panels2
+from traiNNer.archs.mosrv2panels3_arch import MoSRv2Panels3
 from traiNNer.archs.mosrv2panels4_arch import MoSRv2Panels4
 from traiNNer.archs.mosrv2panels5_arch import MoSRv2Panels5
+from traiNNer.archs.mosrv2panels6_arch import MoSRv2Panels6
+from traiNNer.archs.mosrv2panels7_arch import MoSRv2Panels7
+from traiNNer.archs.mosrv2panels_arch import MoSRv2Panels
 
 
 def _small_model(**kwargs: object) -> MoSRv2Panels:
@@ -145,3 +147,61 @@ def test_mosrv2panels5_preserves_rgb_channels_and_backpropagates() -> None:
 def test_mosrv2panels5_validates_scale() -> None:
     with pytest.raises(ValueError, match="scale=1"):
         MoSRv2Panels5(scale=2)
+
+
+def test_mosrv2panels6_uses_panels3_context_and_refines_mask() -> None:
+    model = MoSRv2Panels6(
+        encoder_dims=(8, 12, 16),
+        encoder_blocks=(1, 1, 1),
+        decoder_blocks=(1, 1, 1),
+        num_downsamples=2,
+        context_blocks=1,
+        mask_head_blocks=1,
+        detail_dim=8,
+        detail_blocks=1,
+    )
+    input_tensor = torch.randn(1, 3, 33, 47, requires_grad=True)
+
+    output = model(input_tensor)
+
+    assert isinstance(model.context_model, MoSRv2Panels3)
+    assert output.shape == input_tensor.shape
+    assert torch.equal(output[:, 0], input_tensor[:, 0])
+    assert torch.equal(output[:, 2], input_tensor[:, 2])
+    output[:, 1].square().mean().backward()
+    assert input_tensor.grad is not None
+    assert torch.isfinite(input_tensor.grad).all()
+
+
+def test_mosrv2panels6_requires_scale_one() -> None:
+    with pytest.raises(ValueError, match="scale=1"):
+        MoSRv2Panels6(scale=2)
+
+
+def test_mosrv2panels7_uses_coordinates_and_refines_mask() -> None:
+    model = MoSRv2Panels7(
+        encoder_dims=(8, 12, 16),
+        encoder_blocks=(1, 1, 1),
+        decoder_blocks=(1, 1, 1),
+        num_downsamples=2,
+        context_blocks=1,
+        mask_head_blocks=1,
+        detail_dim=8,
+        detail_blocks=1,
+    )
+    input_tensor = torch.randn(1, 3, 33, 47, requires_grad=True)
+
+    output = model(input_tensor)
+
+    assert model.context_model.stem.in_channels == 4
+    assert output.shape == input_tensor.shape
+    assert torch.equal(output[:, 0], input_tensor[:, 0])
+    assert torch.equal(output[:, 2], input_tensor[:, 2])
+    output[:, 1].square().mean().backward()
+    assert input_tensor.grad is not None
+    assert torch.isfinite(input_tensor.grad).all()
+
+
+def test_mosrv2panels7_requires_scale_one() -> None:
+    with pytest.raises(ValueError, match="scale=1"):
+        MoSRv2Panels7(scale=2)
