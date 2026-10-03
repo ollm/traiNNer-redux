@@ -64,36 +64,57 @@ class _PatternOrientationAligner(nn.Module):
             nn.Conv2d(dim, dim, 3, padding=1),
             nn.GELU(),
         )
-        self.source_angle_head = nn.Linear(dim, 1)
-        self.source_angle = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(1),
-            nn.Linear(dim, dim),
-            nn.GELU(),
-            self.source_angle_head,
-        )
+        self.source_angle_pool = nn.AdaptiveAvgPool2d(1)
+        self.source_angle_projection = nn.Conv2d(dim, dim, 1)
+        self.source_angle_activation = nn.GELU()
+        self.source_angle_head = nn.Conv2d(dim, 1, 1)
         self.pattern_mask = nn.Sequential(nn.Conv2d(dim, 1, 1), nn.Sigmoid())
         nn.init.zeros_(self.source_angle_head.weight)
-        nn.init.zeros_(self.source_angle_head.bias)
+        if self.source_angle_head.bias is not None:
+            nn.init.zeros_(self.source_angle_head.bias)
+
+    @staticmethod
+    def _rotated_grid(x: Tensor, cosine: Tensor, sine: Tensor) -> Tensor:
+        height, width = x.shape[-2:]
+        y_coords = torch.linspace(
+            -1 + 1 / height,
+            1 - 1 / height,
+            height,
+            dtype=x.dtype,
+            device=x.device,
+        )
+        x_coords = torch.linspace(
+            -1 + 1 / width,
+            1 - 1 / width,
+            width,
+            dtype=x.dtype,
+            device=x.device,
+        )
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing="ij")
+        cosine = cosine.view(-1, 1, 1)
+        sine = sine.view(-1, 1, 1)
+        rotated_x = cosine * grid_x + sine * grid_y
+        rotated_y = -sine * grid_x + cosine * grid_y
+        return torch.stack((rotated_x, rotated_y), dim=-1)
 
     def forward(self, source: Tensor, context: Tensor) -> Tensor:
         pattern_residual = source - context
         features = self.features(pattern_residual)
-        source_angle = torch.tanh(self.source_angle(features).squeeze(1))
+        source_angle = torch.tanh(
+            self.source_angle_head(
+                self.source_angle_activation(
+                    self.source_angle_projection(self.source_angle_pool(features))
+                )
+            )
+            .squeeze(-1)
+            .squeeze(-1)
+        )
         source_angle = source_angle * self.max_source_angle_radians
         correction = self.target_angle_radians - source_angle
 
         cosine = torch.cos(correction)
         sine = torch.sin(correction)
-        theta = torch.zeros(
-            source.shape[0], 2, 3, dtype=source.dtype, device=source.device
-        )
-        # affine_grid maps output coordinates to input coordinates.
-        theta[:, 0, 0] = cosine
-        theta[:, 0, 1] = sine
-        theta[:, 1, 0] = -sine
-        theta[:, 1, 1] = cosine
-        grid = F.affine_grid(theta, list(pattern_residual.shape), align_corners=False)
+        grid = self._rotated_grid(pattern_residual, cosine, sine)
         rotated_pattern = F.grid_sample(
             pattern_residual,
             grid,
@@ -119,6 +140,9 @@ class MoSRv2MultiScale4(nn.Module):
     that residual toward ``pattern_target_angle_degrees``, and blends it only
     where its learned mask identifies a pattern. The reoriented residual is
     composed directly with the context before final detail refinement.
+
+    NCNN exports with pattern alignment use the TorchScript trace resolution:
+    export and inference must use that same input size, or fixed-size tiles.
     """
 
     def __init__(  # noqa: PLR0917
