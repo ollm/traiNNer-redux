@@ -8,10 +8,15 @@ from traiNNer.archs.mosrv2multiscalebase2_arch import MoSRv2MultiScaleBase2
 
 
 class _ModelOptions(TypedDict, total=False):
+    anti_alias_downsample: bool
     frequency_guidance: bool
     frequency_kernel_size: int
+    frequency_kernel_sizes: tuple[int, ...]
+    global_context_dilations: tuple[int, ...]
+    noise_input_conditioning: bool
     scale: int
     task: str
+    zero_init_noise: bool
     zero_init_residual: bool
 
 
@@ -83,6 +88,46 @@ def test_multiscalebase2_frequency_guidance_exposes_features_and_gradients() -> 
     assert torch.isfinite(input_tensor.grad).all()
 
 
+def test_multiscalebase2_supports_multiband_anti_alias_global_context() -> None:
+    model = _small_model(
+        frequency_guidance=True,
+        frequency_kernel_sizes=(3, 7, 15),
+        anti_alias_downsample=True,
+        global_context_dilations=(1, 2, 4),
+    )
+    input_tensor = torch.randn(1, 3, 33, 47, requires_grad=True)
+
+    output = model(input_tensor)
+
+    assert model.stem.in_channels == 12
+    assert output.shape == input_tensor.shape
+    output.square().mean().backward()
+    assert input_tensor.grad is not None
+    assert torch.isfinite(input_tensor.grad).all()
+
+
+def test_multiscalebase2_noise_uses_input_conditioning_by_default() -> None:
+    model = _small_model(task="noise", zero_init_noise=True)
+    parameters = dict(model.named_parameters())
+
+    assert "noise_injection.source_condition.0.weight" in parameters
+    assert (
+        torch.count_nonzero(
+            parameters["noise_injection.injection.noise_features.4.weight"]
+        )
+        == 0
+    )
+
+
+def test_multiscalebase2_can_disable_input_conditioned_noise() -> None:
+    model = _small_model(task="noise", noise_input_conditioning=False)
+
+    assert not any(
+        name.startswith("noise_injection.source_condition")
+        for name in model.state_dict()
+    )
+
+
 def test_multiscalebase2_rejects_unsupported_options() -> None:
     with pytest.raises(ValueError, match="task"):
         _small_model(task="panels")
@@ -90,3 +135,7 @@ def test_multiscalebase2_rejects_unsupported_options() -> None:
         _small_model(frequency_kernel_size=2)
     with pytest.raises(ValueError, match="odd integer"):
         _small_model(frequency_kernel_size=1)
+    with pytest.raises(ValueError, match="frequency_kernel_sizes"):
+        _small_model(frequency_kernel_sizes=(3, 4))
+    with pytest.raises(ValueError, match="global_context_dilations"):
+        _small_model(global_context_dilations=(0,))

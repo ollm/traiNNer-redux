@@ -14,14 +14,80 @@ from traiNNer.archs.mosrv2multiscale_arch import (
 from traiNNer.utils.registry import ARCH_REGISTRY
 
 
+class _AntiAliasDownsample(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int) -> None:
+        super().__init__()
+        self.blur = nn.AvgPool2d(3, stride=1, padding=1, count_include_pad=False)
+        self.conv = nn.Conv2d(in_dim, out_dim, 3, stride=2, padding=1)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.conv(self.blur(x))
+
+
+class _DilatedGlobalContext(nn.Module):
+    def __init__(self, dim: int, dilations: Sequence[int]) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        dim, dim, 3, padding=dilation, dilation=dilation, groups=dim
+                    ),
+                    nn.GELU(),
+                    nn.Conv2d(dim, dim, 1),
+                )
+                for dilation in dilations
+            ]
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        for block in self.blocks:
+            x = x + block(x)
+        return x
+
+
+class _InputConditionedNoiseInjection(nn.Module):
+    """Reconstruct texture from decoder features while preserving source RGB cues."""
+
+    def __init__(  # noqa: PLR0917
+        self,
+        dim: int,
+        out_ch: int,
+        scale: int,
+        strength: float,
+        noise_layers: int,
+        zero_init_noise: bool,
+    ) -> None:
+        super().__init__()
+        self.source_condition = nn.Sequential(
+            nn.Conv2d(3, dim, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, 1),
+        )
+        self.injection = _DeterministicNoiseInjection(
+            dim, out_ch, scale, strength, noise_layers
+        )
+        if zero_init_noise:
+            for module in reversed(tuple(self.injection.noise_features.modules())):
+                if isinstance(module, nn.Conv2d):
+                    nn.init.zeros_(module.weight)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                    break
+
+    def forward(self, features: Tensor, source_rgb: Tensor) -> Tensor:
+        return self.injection(features + self.source_condition(source_rgb))
+
+
 @ARCH_REGISTRY.register()
 class MoSRv2MultiScaleBase2(nn.Module):
     """Shared RGB restoration backbone without panel-detection modes.
 
     ``forward_features`` exposes the source-resolution decoder features for
-    future detail or pattern branches. Optional frequency guidance augments the
-    stem with an input high-pass residual. Optional zero initialization makes
-    RGB residual restoration start from an identity mapping.
+    future detail or pattern branches. Optional multi-band frequency guidance,
+    anti-aliased downsampling, and dilated bottleneck context improve periodic
+    artifact modeling. Optional zero initialization makes RGB residual
+    restoration start from an identity mapping.
     """
 
     def __init__(  # noqa: PLR0917
@@ -47,6 +113,11 @@ class MoSRv2MultiScaleBase2(nn.Module):
         zero_init_residual: bool = False,
         frequency_guidance: bool = False,
         frequency_kernel_size: int = 5,
+        frequency_kernel_sizes: Sequence[int] = (),
+        anti_alias_downsample: bool = False,
+        global_context_dilations: Sequence[int] = (),
+        noise_input_conditioning: bool = True,
+        zero_init_noise: bool = False,
     ) -> None:
         super().__init__()
         if task not in ("descreen", "noise"):
@@ -61,6 +132,12 @@ class MoSRv2MultiScaleBase2(nn.Module):
             raise ValueError("num_downsamples must be non-negative.")
         if frequency_kernel_size < 3 or frequency_kernel_size % 2 == 0:
             raise ValueError("frequency_kernel_size must be an odd integer >= 3.")
+        if any(size < 3 or size % 2 == 0 for size in frequency_kernel_sizes):
+            raise ValueError(
+                "frequency_kernel_sizes must contain only odd integers >= 3."
+            )
+        if any(dilation < 1 for dilation in global_context_dilations):
+            raise ValueError("global_context_dilations must contain positive values.")
 
         expected_levels = num_downsamples + 1
         for name, values in (
@@ -96,19 +173,28 @@ class MoSRv2MultiScaleBase2(nn.Module):
         self.num_downsamples = num_downsamples
         self.pad_factor = 2**num_downsamples
         self.feature_dim = dims[0]
+        self.noise_input_conditioning = noise_input_conditioning
         self.frequency_guidance = frequency_guidance
-        self.lowpass = (
-            nn.AvgPool2d(
-                frequency_kernel_size,
-                stride=1,
-                padding=frequency_kernel_size // 2,
-                count_include_pad=False,
-            )
+        self.frequency_kernel_sizes = (
+            tuple(frequency_kernel_sizes)
+            if frequency_guidance and frequency_kernel_sizes
+            else (frequency_kernel_size,)
             if frequency_guidance
-            else None
+            else ()
+        )
+        self.lowpasses = nn.ModuleList(
+            [
+                nn.AvgPool2d(
+                    kernel_size,
+                    stride=1,
+                    padding=kernel_size // 2,
+                    count_include_pad=False,
+                )
+                for kernel_size in self.frequency_kernel_sizes
+            ]
         )
 
-        stem_in_ch = in_ch * (2 if frequency_guidance else 1)
+        stem_in_ch = in_ch * (1 + len(self.frequency_kernel_sizes))
         self.stem = nn.Conv2d(stem_in_ch, dims[0], 3, padding=1)
         self.encoder = nn.ModuleList(
             [
@@ -124,7 +210,11 @@ class MoSRv2MultiScaleBase2(nn.Module):
         )
         self.downsamples = nn.ModuleList(
             [
-                _Downsample(dims[level], dims[level + 1])
+                (
+                    _AntiAliasDownsample(dims[level], dims[level + 1])
+                    if anti_alias_downsample
+                    else _Downsample(dims[level], dims[level + 1])
+                )
                 for level in range(num_downsamples)
             ]
         )
@@ -135,6 +225,7 @@ class MoSRv2MultiScaleBase2(nn.Module):
             rms_norm,
             gradient_checkpointing,
         )
+        self.global_context = _DilatedGlobalContext(dims[-1], global_context_dilations)
         self.decoder = nn.ModuleList(
             [
                 _UpsampleWithSkip(
@@ -176,8 +267,19 @@ class MoSRv2MultiScaleBase2(nn.Module):
         if zero_init_residual and scale > 1:
             self._zero_init_output_layer(self.upsampler)
         self.noise_injection = (
-            _DeterministicNoiseInjection(
-                dims[0], out_ch, scale, noise_strength, noise_layers
+            (
+                _InputConditionedNoiseInjection(
+                    dims[0],
+                    out_ch,
+                    scale,
+                    noise_strength,
+                    noise_layers,
+                    zero_init_noise,
+                )
+                if noise_input_conditioning
+                else _DeterministicNoiseInjection(
+                    dims[0], out_ch, scale, noise_strength, noise_layers
+                )
             )
             if task == "noise"
             else nn.Identity()
@@ -209,8 +311,8 @@ class MoSRv2MultiScaleBase2(nn.Module):
 
         x, height, width = self._pad_input(x)
         input_rgb = x
-        if self.lowpass is not None:
-            x = torch.cat((x, x - self.lowpass(x)), dim=1)
+        if self.lowpasses:
+            x = torch.cat((x, *(x - lowpass(x) for lowpass in self.lowpasses)), dim=1)
         x = self.stem(x)
         skips = []
         for level, encoder in enumerate(self.encoder):
@@ -219,7 +321,7 @@ class MoSRv2MultiScaleBase2(nn.Module):
             if level < self.num_downsamples:
                 x = self.downsamples[level](x)
 
-        x = self.context(x)
+        x = self.global_context(self.context(x))
         for decoder, skip in zip(self.decoder, reversed(skips[:-1]), strict=True):
             x = decoder(x, skip)
 
@@ -239,7 +341,12 @@ class MoSRv2MultiScaleBase2(nn.Module):
             noise_features = x
         output = output_base + residual
         if self.task == "noise":
-            output = output + self.noise_injection(noise_features)
+            noise = (
+                self.noise_injection(noise_features, input_rgb)
+                if self.noise_input_conditioning
+                else self.noise_injection(noise_features)
+            )
+            output = output + noise
         return (
             output[:, :, : height * self.scale, : width * self.scale],
             refined[:, :, :height, :width],
