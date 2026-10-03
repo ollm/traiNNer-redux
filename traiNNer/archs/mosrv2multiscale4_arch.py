@@ -45,7 +45,7 @@ class _SequentialMoSRv2Refiner(nn.Module):
 
 
 class _PatternOrientationAligner(nn.Module):
-    """Predict and selectively rotate the input residual towards a target angle."""
+    """Predict and selectively rotate the input pattern residual."""
 
     def __init__(
         self,
@@ -102,18 +102,23 @@ class _PatternOrientationAligner(nn.Module):
             align_corners=False,
         )
         mask = self.pattern_mask(features)
-        return source + mask * (rotated_pattern - pattern_residual)
+        return pattern_residual + mask * (rotated_pattern - pattern_residual)
 
 
 @ARCH_REGISTRY.register()
 class MoSRv2MultiScale4(nn.Module):
     """MultiScale restoration with optional selective learned pattern alignment.
 
-    When ``pattern_alignment_enabled`` is false, the computation is equivalent to
+    ``task`` accepts a comma-separated set of ``descreen``, ``noise``, and
+    ``pattern``. ``noise`` enables deterministic texture injection; ``pattern``
+    enables learned pattern alignment by default and can be combined with
+    ``noise``. Set ``pattern_alignment_enabled`` explicitly to override that
+    default. When pattern alignment is false, the computation is equivalent to
     :class:`MoSRv2MultiScale3`. When enabled, a learned module estimates the
     orientation of the input residual relative to the restored context, rotates
     that residual toward ``pattern_target_angle_degrees``, and blends it only
-    where its learned mask identifies a pattern.
+    where its learned mask identifies a pattern. The reoriented residual is
+    composed directly with the context before final detail refinement.
     """
 
     def __init__(  # noqa: PLR0917
@@ -138,17 +143,26 @@ class MoSRv2MultiScale4(nn.Module):
         upsampler: SampleMods3 = "pixelshuffledirect",
         upsampler_mid_dim: int = 64,
         gradient_checkpointing: bool = False,
-        pattern_alignment_enabled: bool = False,
+        pattern_alignment_enabled: bool | None = None,
         pattern_alignment_dim: int = 16,
-        pattern_target_angle_degrees: float = 25.0,
+        pattern_target_angle_degrees: float = 30.0,
         pattern_max_source_angle_degrees: float = 180.0,
         pattern_alignment_padding_mode: Literal[
             "zeros", "border", "reflection"
         ] = "border",
     ) -> None:
         super().__init__()
-        if task not in ("descreen", "noise"):
-            raise ValueError("task must be 'descreen' or 'noise'.")
+        task_names = tuple(name.strip() for name in task.split(",") if name.strip())
+        supported_tasks = frozenset(("descreen", "noise", "pattern"))
+        if (
+            not task_names
+            or len(task_names) != len(set(task_names))
+            or not set(task_names).issubset(supported_tasks)
+        ):
+            raise ValueError(
+                "task must be a comma-separated combination of 'descreen', "
+                "'noise', and 'pattern'."
+            )
         if scale < 1:
             raise ValueError("MoSRv2MultiScale4 requires scale >= 1.")
         if in_ch != 3 or out_ch != 3:
@@ -168,6 +182,9 @@ class MoSRv2MultiScale4(nn.Module):
 
         self.scale = scale
         self.task = task
+        self.tasks = frozenset(task_names)
+        if pattern_alignment_enabled is None:
+            pattern_alignment_enabled = "pattern" in self.tasks
         self.context_model = MoSRv2MultiScale(
             scale=1,
             in_ch=in_ch,
@@ -225,7 +242,7 @@ class MoSRv2MultiScale4(nn.Module):
                 noise_strength,
                 noise_layers,
             )
-            if task == "noise"
+            if "noise" in self.tasks
             else nn.Identity()
         )
 
@@ -234,28 +251,29 @@ class MoSRv2MultiScale4(nn.Module):
             raise ValueError("MoSRv2MultiScale4 expects input with shape [B, 3, H, W].")
 
         context_image = self.context_model(x)
-        detail_input = (
-            self.pattern_aligner(x, context_image)
-            if self.pattern_aligner is not None
-            else x
-        )
+        if self.pattern_aligner is None:
+            detail_input = x
+            output_base = context_image
+        else:
+            aligned_pattern = self.pattern_aligner(x, context_image)
+            output_base = context_image + aligned_pattern
+            detail_input = output_base
         detail_features = self.detail_refiner(
             torch.cat((detail_input, context_image), dim=1)
         )
         if self.scale == 1:
             residual = self.to_image(detail_features)
-            output_base = context_image
         else:
             residual = self.upsampler(detail_features)
             output_base = F.interpolate(
-                context_image,
+                output_base,
                 scale_factor=self.scale,
                 mode="bilinear",
                 align_corners=False,
             )
 
         output = output_base + residual
-        if self.task == "noise":
+        if "noise" in self.tasks:
             output = output + self.noise_injection(detail_features)
         return output
 
