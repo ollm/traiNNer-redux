@@ -878,6 +878,17 @@ class SRModel(BaseModel):
                     tmp_out = self.infer_tiled(net, lq)
                 else:
                     tmp_out = net(lq)
+
+                inference_model = (
+                    net.ema_model if isinstance(net, EMA) else self.get_bare_model(net)
+                )
+                post_process = getattr(inference_model, "post_process_inference", None)
+                if callable(post_process):
+                    processed_output = post_process(tmp_out)
+                    if not isinstance(processed_output, Tensor):
+                        raise TypeError("post_process_inference must return a Tensor.")
+                    tmp_out = processed_output
+
                 self.output = pixelformat2rgb_pt(
                     tmp_out, self.gt, self.opt.output_pixel_format
                 )

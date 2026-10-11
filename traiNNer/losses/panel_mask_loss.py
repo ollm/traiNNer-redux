@@ -4,12 +4,13 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F  # noqa: N812
 
+from traiNNer.utils.panel_mask_util import panel_boundary_probability
 from traiNNer.utils.registry import LOSS_REGISTRY
 
 
 @LOSS_REGISTRY.register()
 class PanelMaskLoss(nn.Module):
-    def __init__(
+    def __init__(  # noqa: PLR0917
         self,
         loss_weight: float,
         mask_bce_weight: float = 2.0,
@@ -21,6 +22,7 @@ class PanelMaskLoss(nn.Module):
         mask_curvature_weight: float = 0.25,
         mask_positive_weight: float = 2.0,
         eps: float = 1e-6,
+        mask_boundary_weight: float = 0.0,
     ) -> None:
         super().__init__()
         self.loss_weight = loss_weight
@@ -31,6 +33,7 @@ class PanelMaskLoss(nn.Module):
         self.border_continuity_weight = border_continuity_weight
         self.mask_multiscale_weight = mask_multiscale_weight
         self.mask_curvature_weight = mask_curvature_weight
+        self.mask_boundary_weight = mask_boundary_weight
         self.mask_positive_weight = mask_positive_weight
         self.eps = eps
 
@@ -40,7 +43,9 @@ class PanelMaskLoss(nn.Module):
                 "PanelMaskLoss expects pred and target with shape [B, C, H, W]."
             )
         if pred.shape != target.shape:
-            raise ValueError("PanelMaskLoss expects pred and target to have the same shape.")
+            raise ValueError(
+                "PanelMaskLoss expects pred and target to have the same shape."
+            )
         if pred.shape[1] != 3:
             raise ValueError("PanelMaskLoss expects exactly 3 channels (RGB).")
 
@@ -54,9 +59,9 @@ class PanelMaskLoss(nn.Module):
         mask_target = mask_target / target_scale
 
         positive_fraction = mask_target.mean().detach()
-        class_balance = ((1 - positive_fraction) / (positive_fraction + self.eps)).clamp(
-            min=1.0, max=self.mask_positive_weight
-        )
+        class_balance = (
+            (1 - positive_fraction) / (positive_fraction + self.eps)
+        ).clamp(min=1.0, max=self.mask_positive_weight)
         bce = F.binary_cross_entropy_with_logits(
             mask_logits, mask_target, reduction="none"
         )
@@ -72,6 +77,12 @@ class PanelMaskLoss(nn.Module):
         )
 
         mask_probabilities = torch.sigmoid(mask_logits)
+        boundary_loss = mask_probabilities.new_zeros(())
+        if self.mask_boundary_weight > 0:
+            predicted_boundary = panel_boundary_probability(mask_probabilities)
+            target_boundary = panel_boundary_probability(mask_target)
+            boundary_loss = F.l1_loss(predicted_boundary, target_boundary)
+
         pred_flat = mask_probabilities.flatten(1)
         target_flat = mask_target.flatten(1)
         intersection = (pred_flat * target_flat).sum(dim=1)
@@ -128,7 +139,9 @@ class PanelMaskLoss(nn.Module):
                 coarse_prediction = F.avg_pool2d(
                     mask_probabilities, kernel_size=scale, stride=scale
                 )
-                coarse_target = F.avg_pool2d(mask_target, kernel_size=scale, stride=scale)
+                coarse_target = F.avg_pool2d(
+                    mask_target, kernel_size=scale, stride=scale
+                )
                 multiscale_loss = multiscale_loss + F.l1_loss(
                     coarse_prediction, coarse_target
                 )
@@ -141,6 +154,7 @@ class PanelMaskLoss(nn.Module):
             + self.border_continuity_weight * continuity_loss
             + self.mask_multiscale_weight * multiscale_loss
             + self.mask_curvature_weight * curvature_loss
+            + self.mask_boundary_weight * boundary_loss
         )
 
 

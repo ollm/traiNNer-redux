@@ -1,0 +1,76 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+name: opencomic_mosrv2panels9
+scale: 1
+num_gpu: auto
+use_amp: true
+output_pixel_format: rgb
+
+datasets:
+  train:
+    name: OpenComic train
+    type: pairedimagedataset
+    # Input RGB: grayscale in R/B and a constant 255 in G.
+    dataroot_lq: [datasets/opencomic/train/input]
+    # Target RGB: grayscale in R/B and the binary panel mask in G.
+    dataroot_gt: [datasets/opencomic/train/target]
+    lq_size: 256
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+  val:
+    name: OpenComic validation
+    type: pairedimagedataset
+    # Use the same three-channel layout as the training pairs.
+    dataroot_lq: [datasets/opencomic/val/input]
+    dataroot_gt: [datasets/opencomic/val/target]
+
+network_g:
+  type: mosrv2panels9
+  encoder_dims: [16, 24, 40]
+  encoder_blocks: [2, 4, 8]
+  decoder_blocks: [4, 3, 2]
+  num_downsamples: 2
+  context_blocks: 2
+  mask_head_blocks: 2
+  detail_dim: 32
+  detail_blocks: 16
+  expansion_ratio: 1.5
+  rms_norm: false
+  gradient_checkpointing: false
+
+path:
+  param_key_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+  scheduler:
+    type: MultiStepLR
+    milestones: [250000, 400000, 450000, 475000]
+    gamma: 0.5
+  total_iter: 500000
+  warmup_iter: -1
+  losses:
+    - type: panel_mask
+      loss_weight: 1.0
+      mask_boundary_weight: 0.5
+
+val:
+  val_enabled: false
+  val_freq: 1000
+  save_img: false
+  tile_size: 0
+  metrics_enabled: false
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 1000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

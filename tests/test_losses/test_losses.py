@@ -283,6 +283,22 @@ class TestLosses:
 
         assert torch.isfinite(loss(prediction, target))
 
+    def test_panel_mask_boundary_loss_uses_derived_targets_and_backpropagates(
+        self,
+    ) -> None:
+        target = torch.zeros(1, 3, 12, 12)
+        target[:, 1, 3:9, 3:9] = 255.0
+        prediction = torch.zeros_like(target, requires_grad=True)
+
+        loss = PanelMaskLoss(loss_weight=1.0, mask_boundary_weight=0.5)
+        value = loss(prediction, target)
+
+        assert torch.isfinite(value)
+        value.backward()
+        assert prediction.grad is not None
+        assert torch.isfinite(prediction.grad).all()
+        assert prediction.grad[:, 1].abs().sum() > 0
+
     def test_msssim(self) -> None:
         white = torch.ones(1, 3, 256, 256)
         black = torch.zeros(1, 3, 256, 256)
