@@ -10,7 +10,7 @@ if __name__ == "__main__":
 
 
 import argparse
-import datetime
+import datetime as dt
 import gc
 import logging
 import math
@@ -50,7 +50,11 @@ from traiNNer.utils.misc import (
     free_space_gb_str,
     set_random_seed,
 )
-from traiNNer.utils.options import copy_opt_file, diff_user_vs_template
+from traiNNer.utils.options import (
+    copy_opt_file,
+    create_config_from_args,
+    diff_user_vs_template,
+)
 from traiNNer.utils.redux_options import ReduxOptions
 from traiNNer.utils.types import TrainingState
 
@@ -242,6 +246,10 @@ def load_resume_state(opt: ReduxOptions) -> Any | None:
 def train_pipeline(root_path: str) -> None:
     install()
 
+    # train.py --new creates a config and exits; it doesn't need a GPU
+    if create_config_from_args(root_path):
+        return
+
     if not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA is not available. Please ensure that you have a GPU with CUDA support "
@@ -278,9 +286,8 @@ def train_pipeline(root_path: str) -> None:
     resume_state = load_resume_state(opt)
     make_exp_dirs(opt, resume_state is not None)
     # mkdir for experiments and logger
-    if resume_state is None:
-        if opt.logger.use_tb_logger and opt.rank == 0:
-            mkdir_and_rename(osp.join(opt.root_path, "tb_logger", opt.name))
+    if resume_state is None and opt.logger.use_tb_logger and opt.rank == 0:
+        mkdir_and_rename(osp.join(opt.root_path, "tb_logger", opt.name))
 
     # copy the yml file to the experiment root
     copy_opt_file(args.opt, opt.path.experiments_root)
@@ -325,22 +332,20 @@ def train_pipeline(root_path: str) -> None:
         )
 
     if opt.fast_matmul:
-        torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.fp32_precision = "tf32"
 
     # create model
     model = build_model(opt)
-    if model.with_metrics:
-        if not any(
-            isinstance(
-                val_loader.dataset,
-                (PairedImageDataset | PairedVideoDataset),
-            )
-            for val_loader in val_loaders
-        ):
-            raise ValueError(
-                "Validation metrics are enabled, at least one validation dataset must have type PairedImageDataset or PairedVideoDataset."
-            )
+    if model.with_metrics and not any(
+        isinstance(
+            val_loader.dataset,
+            (PairedImageDataset | PairedVideoDataset),
+        )
+        for val_loader in val_loaders
+    ):
+        raise ValueError(
+            "Validation metrics are enabled, at least one validation dataset must have type PairedImageDataset or PairedVideoDataset."
+        )
 
     if torch.is_anomaly_enabled():
         logger.warning(
@@ -511,8 +516,8 @@ def train_pipeline(root_path: str) -> None:
             if interrupt_received:
                 break
         # end of epoch
-    except Exception as e:
-        logger.exception(e)
+    except Exception:
+        logger.exception("Training crashed")
         crashed = True
         interrupt_received = True
 
@@ -520,7 +525,7 @@ def train_pipeline(root_path: str) -> None:
     if train_data is None:
         epoch += 1
 
-    consumed_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
+    consumed_time = str(dt.timedelta(seconds=int(time.time() - start_time)))
 
     if interrupt_received:
         # discard partially accumulated iters
@@ -536,7 +541,10 @@ def train_pipeline(root_path: str) -> None:
                 latest_mtime = -1.0
                 for entry in os.scandir(models_dir):
                     # Validate checkpoint extension and ensure it's not zero-byte
-                    if entry.is_file() and entry.name.rsplit(".", 1)[-1] in ("pth", "safetensors"):
+                    if entry.is_file() and entry.name.rsplit(".", 1)[-1] in (
+                        "pth",
+                        "safetensors",
+                    ):
                         stat = entry.stat()
                         if stat.st_size > 0 and stat.st_mtime > latest_mtime:
                             latest_mtime = stat.st_mtime
@@ -547,7 +555,7 @@ def train_pipeline(root_path: str) -> None:
 
             if skip_save:
                 logger.info(
-                    "A checkpoint in %s was written less than a minute ago; won't save a new one. " \
+                    "A checkpoint in %s was written less than a minute ago; won't save a new one. "
                     "Stopped at epoch: %d, iter: %d.",
                     clickable_file_path(model.opt.path.models, "experiments folder"),
                     epoch,
@@ -561,10 +569,13 @@ def train_pipeline(root_path: str) -> None:
                     current_iter,
                 )
                 model.save(epoch, current_iter)
-        if model.opt.dist:
+        # After a crash the other ranks may be blocked in a collective or barrier
+        # waiting for this rank, and destroy_process_group would wait on them.
+        # Skip it and exit non-zero so torchrun stops the other ranks.
+        if model.opt.dist and not crashed:
             destroy_process_group()
         logger.info("Training stopped. Time consumed: %s", consumed_time)
-        sys.exit(0)
+        sys.exit(1 if crashed else 0)
 
     logger.info("End of training. Time consumed: %s", consumed_time)
     logger.info("Save the latest model.")

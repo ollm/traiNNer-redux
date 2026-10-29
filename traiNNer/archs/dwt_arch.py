@@ -8,9 +8,7 @@ from collections.abc import Sequence
 
 import torch
 import torch.nn.functional as F  # noqa: N812
-from timm.layers.drop import DropPath
-from timm.layers.helpers import to_2tuple
-from timm.layers.weight_init import trunc_normal_
+from spandrel.util.timm import DropPath, to_2tuple, trunc_normal_
 from torch import nn
 from torch.utils import checkpoint
 
@@ -198,7 +196,9 @@ class WindowAttention(nn.Module):
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(self.window_size[0])
         coords_w = torch.arange(self.window_size[1])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
+        coords = torch.stack(
+            torch.meshgrid([coords_h, coords_w], indexing="ij")
+        )  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
         relative_coords = (
             coords_flatten[:, :, None] - coords_flatten[:, None, :]
@@ -664,7 +664,7 @@ class AttentionBlock(nn.Module):
     def forward(self, x, x_size):
         for blk in self.blocks:
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, x_size)
+                x = checkpoint.checkpoint(blk, x, x_size, use_reentrant=False)
             else:
                 x = blk(x, x_size)
         if self.downsample is not None:

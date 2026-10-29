@@ -7,7 +7,6 @@ https://dsp.stackexchange.com/questions/35339/jpeg-dct-padding/35343#35343
 
 import itertools
 from collections.abc import Callable
-from typing import TypeVar
 
 import numpy as np
 import torch
@@ -42,10 +41,7 @@ def diff_round(x: Tensor) -> Tensor:
     return torch.round(x) + (x - torch.round(x)) ** 3
 
 
-T = TypeVar("T", float, Tensor)
-
-
-def quality_to_factor(quality: T) -> T:
+def quality_to_factor[T: (float, Tensor)](quality: T) -> T:
     """Calculate factor corresponding to quality
 
     Args:
@@ -263,8 +259,8 @@ class CompressJpeg(nn.Module):
         """
         y, cb, cr = self.l1(image * 255)
         components = {"y": y, "cb": cb, "cr": cr}
-        for k in components:
-            comp = self.l2(components[k])
+        for k, v in components.items():
+            comp = self.l2(v)
             if k in ("cb", "cr"):
                 comp = self.c_quantize(comp, factor=factor)
             else:
@@ -461,12 +457,12 @@ class DeCompressJpeg(nn.Module):
             Tensor: batch x 3 x height x width
         """
         components = {"y": y, "cb": cb, "cr": cr}
-        for k in components:
+        for k, v in components.items():
             if k in ("cb", "cr"):
-                comp = self.c_dequantize(components[k], factor=factor)
+                comp = self.c_dequantize(v, factor=factor)
                 height, width = int(imgh / 2), int(imgw / 2)
             else:
-                comp = self.y_dequantize(components[k], factor=factor)
+                comp = self.y_dequantize(v, factor=factor)
                 height, width = imgh, imgw
             comp = self.idct(comp)
             components[k] = self.merging(comp, height, width)

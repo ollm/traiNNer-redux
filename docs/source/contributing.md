@@ -1,6 +1,6 @@
 # Contributing
 ## Prerequisites
-This project targets [Python 3.12](https://www.python.org/). [Visual Studio Code](https://code.visualstudio.com/) is the recommended IDE, with the [Pylance](https://marketplace.visualstudio.com/items?itemName=ms-python.vscode-pylance), [Ruff](https://marketplace.visualstudio.com/items?itemName=charliermarsh.ruff), and [YAML](https://marketplace.visualstudio.com/items?itemName=redhat.vscode-yaml) extensions.
+This project targets [Python 3.14](https://www.python.org/). [Visual Studio Code](https://code.visualstudio.com/) is the recommended IDE, with the [Pylance](https://marketplace.visualstudio.com/items?itemName=ms-python.vscode-pylance), [Ruff](https://marketplace.visualstudio.com/items?itemName=charliermarsh.ruff), and [YAML](https://marketplace.visualstudio.com/items?itemName=redhat.vscode-yaml) extensions.
 
 This repo includes a tiny test dataset so it's ready to run the training pipeline out of the box, with no need to prepare your own dataset.
 
@@ -14,7 +14,7 @@ To set up your environment, do the following:
 
 1. To start training, do one of the following:
    - In VS Code's Run and Debug tab, select the `Train ESRGAN` launch configuration and launch it to start debugging the training code.
-   - Run the command `python -opt ./options/train/ESRGAN/ESRGAN.yml` (modify the path to the yml file if you want to test a different architecture) to start training without debugging.
+   - Run the commands `python train.py --new esrgan --name test_ESRGAN` and then `python train.py -opt ./options/train/ESRGAN/test_ESRGAN.yml` (change `esrgan` to test a different architecture) to start training without debugging.
 2. Verify that you see the following output within a few minutes, depending on your GPU speed:
    ```
    ...

@@ -6,8 +6,7 @@ from collections.abc import Sequence
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from timm.models import register_notrace_function
-from timm.layers import DropPath, _assert, to_2tuple, trunc_normal_
+from spandrel.util.timm import DropPath, to_2tuple, trunc_normal_
 from torch import nn
 from torch.utils import checkpoint
 from torchvision.transforms import functional as TF
@@ -100,7 +99,6 @@ def window_partition(x, window_size):
     return windows, (wh, ww)
 
 
-@register_notrace_function  # reason: int argument is a Proxy
 def window_unpartition(windows, num_windows):
     """
     Args:
@@ -260,14 +258,16 @@ class SCC(nn.Module):
         # add relative position bias
         position_bias_h = torch.arange(1 - self.H_sp, self.H_sp, device=v.device)
         position_bias_w = torch.arange(1 - self.W_sp, self.W_sp, device=v.device)
-        biases = torch.stack(torch.meshgrid([position_bias_h, position_bias_w]))
+        biases = torch.stack(
+            torch.meshgrid([position_bias_h, position_bias_w], indexing="ij")
+        )
         rpe_biases = biases.flatten(1).transpose(0, 1).contiguous().float()
         pos = self.pos(rpe_biases)
 
         # select position bias
         coords_h = torch.arange(self.H_sp, device=v.device)
         coords_w = torch.arange(self.W_sp, device=v.device)
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
         coords_flatten = torch.flatten(coords, 1)
         relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
         relative_coords = relative_coords.permute(1, 2, 0).contiguous()
@@ -408,7 +408,9 @@ class NGramWindowAttention(nn.Module):
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(self.window_size[0])
         coords_w = torch.arange(self.window_size[1])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
+        coords = torch.stack(
+            torch.meshgrid([coords_h, coords_w], indexing="ij")
+        )  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
         relative_coords = (
             coords_flatten[:, :, None] - coords_flatten[:, None, :]
@@ -500,7 +502,7 @@ class NGramContext(nn.Module):
         self, dim, window_size, ngram, ngram_num_heads, padding_mode="seq_refl_win_pad"
     ) -> None:
         super().__init__()
-        _assert(
+        torch._assert(
             padding_mode in ["seq_refl_win_pad", "zero_pad"],
             "padding mode should be 'seq_refl_win_pad' or 'zero_pad'!!",
         )
@@ -643,7 +645,7 @@ class NGramWindowPartition(nn.Module):
             ph // self.window_size,
             pw // self.window_size,
         )  # number of windows (height, width)
-        _assert(
+        torch._assert(
             0 not in [wh, ww], "feature map size should be larger than window size!"
         )
 
@@ -918,7 +920,11 @@ class BasicLayer(nn.Module):
         for blk in self.blocks:
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(
-                    blk, x, x_size, (self.win_hs[i], self.win_ws[i])
+                    blk,
+                    x,
+                    x_size,
+                    (self.win_hs[i], self.win_ws[i]),
+                    use_reentrant=False,
                 )
             else:
                 x = blk(x, x_size, (self.win_hs[i], self.win_ws[i]))
