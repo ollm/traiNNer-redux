@@ -118,12 +118,21 @@ class _DeterministicNoiseInjection(nn.Module):
         height, width = features.shape[-2:]
         condition = self.condition(features) + self.local_detail(features)
         coarse = F.avg_pool2d(features, kernel_size=2, stride=2, ceil_mode=True)
-        coarse = F.interpolate(
-            self.coarse_condition(coarse),
-            size=(height, width),
-            mode="bilinear",
-            align_corners=False,
-        )
+        coarse = self.coarse_condition(coarse)
+        if height % 2 == 0 and width % 2 == 0:
+            coarse = F.interpolate(
+                coarse,
+                scale_factor=2,
+                mode="bilinear",
+                align_corners=False,
+            )
+        else:
+            coarse = F.interpolate(
+                coarse,
+                size=(height, width),
+                mode="bilinear",
+                align_corners=False,
+            )
         generated_noise = self.noise_features(torch.cat((condition, coarse), dim=1))
         if self.scale > 1:
             generated_noise = F.pixel_shuffle(generated_noise, self.scale)
